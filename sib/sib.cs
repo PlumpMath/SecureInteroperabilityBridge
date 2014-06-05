@@ -6,7 +6,8 @@ using System.Threading.Tasks;
 using System.Security.Cryptography;
 using System.Web;
 using System.IO;
-
+using System.Xml;
+using System.IdentityModel.Tokens;
 
 namespace SiemensISRM
 {
