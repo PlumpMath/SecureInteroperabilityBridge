@@ -8,9 +8,99 @@ using System.Web;
 using System.IO;
 using System.Xml;
 using System.IdentityModel.Tokens;
+using System.Collections.Specialized;
+using System.Security.Cryptography.Xml;
+using System.Configuration;
 
 namespace SiemensISRM
 {
+
+    public class SIBLog
+    {
+        public static void Write(string t, params string[] p)
+        {
+            try
+            {
+                string fileName = ConfigurationManager.AppSettings["SIBLogfilepath"].ToString();
+
+                using (StreamWriter w = File.AppendText(fileName))
+                {
+                    w.Write("\"{0}\", \"{1}\"", DateTime.Now.ToString(), t);
+                    for (int i = 0; i < p.Length; i++) w.Write(", \"{0}\"", p[i]);
+                    w.WriteLine("");
+                }
+            }
+            catch { }
+        }
+    }
+    public class SIBData
+    {
+        public static NameValueCollection parameters;
+    }
+    public class SIBConsume
+    {
+        private static bool IsSamlToken;
+
+        public static NameValueCollection BuildNVC(string p, char b1, char b2)
+        {
+            NameValueCollection n = new NameValueCollection();
+            string[] a = p.Split(b1);
+            string[] nv;
+            foreach (string s in a)
+            {
+                nv = s.Split(b2);
+                n.Add(nv[0], nv[1]);
+            }
+            return n;
+        }
+        public static void ParseRequest(HttpRequest request)
+        {
+            SIBData.parameters = request.QueryString;
+            SIBData.parameters.Add(request.Form);
+
+            if (SIBData.parameters["SAMLResponse"] == "") 
+            {
+                SIBLog.Write("Information", "SAMLResponse detected.", SIBData.parameters["SAMLResponse"]);
+                IsSamlToken = true;
+                try
+                {
+                    XmlDocument xmlSAML = new XmlDocument();
+                    xmlSAML.LoadXml(System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(SIBData.parameters["SAMLResponse"])));
+                    SIBLog.Write("Information", "Loading SAML token for signature validation.");
+                    if (IsValidSignature(xmlSAML)) 
+                    {
+                        SIBLog.Write("Information", "SAML Signature is valid.");
+                        XmlNodeList nodeList = xmlSAML.GetElementsByTagName(ConfigurationManager.AppSettings["SIBSourceSAMLAttributeElement"].ToString());
+
+                        for (int i = 0; i < nodeList.Count; i++) 
+                        {
+                            SIBData.parameters.Add(nodeList.Item(i).Attributes.Item(0).Value, nodeList.Item(i).InnerText);
+                        }
+                    }
+                    else SIBLog.Write("Error", "SAML Signature is invalid.");
+                }
+                catch 
+                { 
+                    SIBLog.Write("Error", "No or improperly formated SAMLResponse value presented");
+                }
+            } else IsSamlToken = false;
+
+            for (int i = 0; i < SIBData.parameters.Count; i++) SIBLog.Write("Information", SIBData.parameters.GetKey(0), SIBData.parameters[0]);
+        }
+
+        private static bool IsValidSignature(XmlDocument xmlDoc)
+        {
+            SignedXml signedXml = new SignedXml(xmlDoc);
+            XmlNodeList nodeList = xmlDoc.GetElementsByTagName(ConfigurationManager.AppSettings["SIBSourceSAMLSignatureElement"].ToString());
+
+            if (nodeList != null && nodeList.Count > 0)
+            {
+                signedXml.LoadXml((XmlElement)nodeList[0]);
+                return signedXml.CheckSignature();
+            }
+            return false;
+        }
+    }
     public class SIBTime
     {
         public static string UTCTimeStamp()
@@ -50,6 +140,24 @@ namespace SiemensISRM
         public static string URLEncode(string u)
         {
             return HttpUtility.UrlEncode(u);
+        }
+        public static string BytestoHex(byte[] b)
+        {
+            string h = string.Empty;
+
+            for (int i=0; i<b.Length;i++)
+            {
+                h += b[i].ToString("X2");
+            }
+            return h;
+        }
+        public static string HashMD5_HEX(string plainText)
+        {
+            return SIBCrypto.BytestoHex(HashMD5(Encoding.UTF8.GetBytes(plainText)));
+        }
+        public static string HashMD5_64(string plainText)
+        {
+            return HashMD5_64(Encoding.UTF8.GetBytes(plainText));
         }
         public static string HashMD5_64(byte [] plainText)
         {
