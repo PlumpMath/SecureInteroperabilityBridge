@@ -16,9 +16,7 @@ namespace ECWTransformation
         public void ProcessRequest(HttpContext context)
         {
             context.Response.ContentType = "text/plain";
-            context.Response.Write("Processing Request...")
-
-
+            context.Response.Write("Processing Request...");
             String args = Transformation(context.Request.QueryString.ToString()); 
             context.Response.Redirect(args);
         }

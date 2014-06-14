@@ -19,6 +19,9 @@ namespace SiemensISRM
     {
         public static void Write(string t, params string[] p)
         {
+            string loglevel = ConfigurationManager.AppSettings["SIBLogfileLevel"].ToLower();
+            if (loglevel == "information" && t.ToLower() == "debug") return;
+            if (loglevel == "error" && t.ToLower() != "error") return;                
             try
             {
                 string fileName = ConfigurationManager.AppSettings["SIBLogfilepath"].ToString();
@@ -33,40 +36,144 @@ namespace SiemensISRM
             catch { }
         }
     }
+
     public class SIBData
     {
-        public static NameValueCollection parameters;
+        public static NameValueCollection inParams = new NameValueCollection();
+        public static NameValueCollection outParams = new NameValueCollection();
+        public static string redirectGETRequest;
+        public static string redirectPOSTRequest;
     }
-    public class SIBConsume
-    {
-        private static bool IsSamlToken;
 
+    public class SIBTransform
+    {
         public static NameValueCollection BuildNVC(string p, char b1, char b2)
         {
             NameValueCollection n = new NameValueCollection();
-            string[] a = p.Split(b1);
-            string[] nv;
-            foreach (string s in a)
+            if (!String.IsNullOrEmpty(p))
             {
-                nv = s.Split(b2);
-                n.Add(nv[0], nv[1]);
+                string[] a = p.Split(b1);
+                string[] nv;
+                foreach (string s in a)
+                {
+                    nv = s.Split(b2);
+                    n.Add(nv[0], nv[1]);
+                }
             }
             return n;
         }
+        public static bool IsPostRequest()
+        {
+            if (ConfigurationManager.AppSettings["SIBTargetRequestType"].ToUpper() == "POST") return true;
+            return false;
+        }
+        public static void BuildResponse()
+        {
+            string[] encryptionParameters = ConfigurationManager.AppSettings["SIBTargetHashParameters"].Split(';');
+            string plaintext = String.Empty;
+            string ciphertext = String.Empty;
+            string timestamp;
+
+            // Populate timestamp parameter in preparation for use
+            if (ConfigurationManager.AppSettings["SIBTargetTimestampUTC"].ToLower() == "true") timestamp = SIBTime.UTCTimeStamp();
+            else timestamp = SIBTime.TimeStamp();
+            SIBLog.Write("Debug", "Timestamp", timestamp);
+
+            // acquire encryption parameters identified in config file and build a cleartext string
+            foreach (string parm in encryptionParameters)
+            {
+                switch(parm)
+                {
+                    case "SIBTargetCipherKey":
+                        plaintext += ConfigurationManager.AppSettings["SIBTargetCipherKey"];
+                        break;
+                    case "SIBTargetTimestamp":
+                        plaintext += timestamp;
+                        break;
+                    default:
+                        plaintext += SIBData.inParams[parm];
+                        break;
+                }
+            }
+            SIBLog.Write("Debug", "Plaintext", plaintext);
+
+            // Encrypt the required parameters with appropirate cipher
+            switch (ConfigurationManager.AppSettings["SIBTargetCipher"].ToUpper())
+            {
+                case "MD5":
+                    if (ConfigurationManager.AppSettings["SIBTargetCipherEncoding"].ToUpper() == "HEX") ciphertext = SIBCrypto.HashMD5_HEX(plaintext);
+                    else if (ConfigurationManager.AppSettings["SIBTargetCipherEncoding"].ToUpper() == "BASE64") ciphertext = SIBCrypto.HashMD5_64(plaintext);
+                    break;
+                default:
+                    ciphertext = plaintext;
+                    break;
+            }
+            SIBLog.Write("Debug", "Ciphertext", ciphertext);
+
+            // Replace values from source to target in parameter list
+            SIBData.outParams.Clear();
+            SIBData.outParams.Add(BuildNVC(ConfigurationManager.AppSettings["SIBTargetParameters"], ';', '='));
+            foreach (string key in SIBData.outParams.AllKeys)
+            {
+                switch (SIBData.outParams[key])
+                {
+                    case "SIBTargetHashParameters":
+                        SIBData.outParams[key] = ciphertext;
+                        break;
+                    case "SIBTargetTimestamp":
+                        SIBData.outParams[key] = timestamp;
+                        break;
+                    default:
+                        SIBData.outParams[key] = SIBData.inParams[SIBData.outParams[key]];
+                        break;
+                }
+            }
+
+            //Build the redirect URL
+            SIBData.redirectGETRequest = ConfigurationManager.AppSettings["SIBTargetRedirectURL"] + "?";
+            for (int i=0; i<SIBData.outParams.Count;i++)
+            {
+                SIBData.redirectGETRequest += String.Format("{0}={1}", SIBData.outParams.GetKey(i), SIBData.outParams[i]);
+                if (i < SIBData.outParams.Count-1) SIBData.redirectGETRequest += "&";
+            }
+            SIBLog.Write("Debug", "Get Request", SIBData.redirectGETRequest);
+
+            //Build the response/redirect HTLM document
+            SIBData.redirectPOSTRequest = "<html>";
+            SIBData.redirectPOSTRequest += @"<body onload='document.forms[""form""].submit()'>";
+            SIBData.redirectPOSTRequest += String.Format("<form name='form' action='{0}' method='post'>", ConfigurationManager.AppSettings["SIBTargetRedirectURL"]);
+            foreach (string key in SIBData.outParams.AllKeys)
+            {
+                SIBData.redirectPOSTRequest += String.Format("<input type='hidden' name='{0}' value='{1}'>", key, SIBData.outParams[key]);
+            }
+            SIBData.redirectPOSTRequest += "</form></body></html>";
+            SIBLog.Write("Debug", "Post Request", SIBData.redirectPOSTRequest);
+        }
+
         public static void ParseRequest(HttpRequest request)
         {
-            SIBData.parameters = request.QueryString;
-            SIBData.parameters.Add(request.Form);
-
-            if (SIBData.parameters["SAMLResponse"] == "") 
+            SIBLog.Write("Debug", "HTTPRequest GET.", request.QueryString.ToString());
+            SIBData.inParams.Clear();
+            foreach (string key in request.QueryString.AllKeys)
             {
-                SIBLog.Write("Information", "SAMLResponse detected.", SIBData.parameters["SAMLResponse"]);
-                IsSamlToken = true;
+                SIBData.inParams.Set(key, request.QueryString[key]);
+            }
+
+            SIBLog.Write("Debug", "HTTPRequest POST.", request.Form.ToString());
+            foreach (string key in request.Form.AllKeys)
+            {
+                SIBData.inParams.Set(key, request.Form[key]);
+            }
+
+            if (!String.IsNullOrEmpty(SIBData.inParams["SAMLResponse"])) 
+            {
+                SIBLog.Write("Information", "SAMLResponse detected.");
                 try
                 {
                     XmlDocument xmlSAML = new XmlDocument();
-                    xmlSAML.LoadXml(System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(SIBData.parameters["SAMLResponse"])));
-                    SIBLog.Write("Information", "Loading SAML token for signature validation.");
+                    string decodedSAML = System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(SIBData.inParams["SAMLResponse"]));
+                    SIBLog.Write("Debug", "Decoded SAML", decodedSAML);
+                    xmlSAML.LoadXml(decodedSAML);
                     if (IsValidSignature(xmlSAML)) 
                     {
                         SIBLog.Write("Information", "SAML Signature is valid.");
@@ -74,7 +181,7 @@ namespace SiemensISRM
 
                         for (int i = 0; i < nodeList.Count; i++) 
                         {
-                            SIBData.parameters.Add(nodeList.Item(i).Attributes.Item(0).Value, nodeList.Item(i).InnerText);
+                            SIBData.inParams.Set(nodeList.Item(i).Attributes.Item(0).Value, nodeList.Item(i).InnerText);
                         }
                     }
                     else SIBLog.Write("Error", "SAML Signature is invalid.");
@@ -83,9 +190,22 @@ namespace SiemensISRM
                 { 
                     SIBLog.Write("Error", "No or improperly formated SAMLResponse value presented");
                 }
-            } else IsSamlToken = false;
+            }
 
-            for (int i = 0; i < SIBData.parameters.Count; i++) SIBLog.Write("Information", SIBData.parameters.GetKey(0), SIBData.parameters[0]);
+            SIBLog.Write("Debug", "Parameters consumed from target post processing...");
+            for (int i = 0; i < SIBData.inParams.Count; i++) SIBLog.Write("Debug", SIBData.inParams.GetKey(i), SIBData.inParams[i]);
+
+            // Override static configuration values set by implementation
+            NameValueCollection n = new NameValueCollection();
+            n.Add(BuildNVC(ConfigurationManager.AppSettings["SIBSourceParametersOverride"], ';', '='));
+            foreach (string key in n.AllKeys)
+            {
+                SIBData.inParams.Set(key, n[key]);
+            }
+
+            SIBLog.Write("Debug", "Parameters post override processing...");
+            for (int i = 0; i < SIBData.inParams.Count; i++) SIBLog.Write("Debug", SIBData.inParams.GetKey(i), SIBData.inParams[i]);
+
         }
 
         private static bool IsValidSignature(XmlDocument xmlDoc)
